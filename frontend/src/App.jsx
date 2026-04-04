@@ -21,18 +21,41 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+
+    async function fetchMe() {
+      return fetch(`${API_BASE}/api/auth/me`, {
+        credentials: "include"
+      });
+    }
+
+    async function refresh() {
+      return fetch(`${API_BASE}/api/auth/refresh`, {
+        method: "POST",
+        credentials: "include"
+      });
+    }
+
     async function loadUser() {
       try {
-        const res = await fetch(`${API_BASE}/api/auth/me`, {
-          credentials: "include"
-        });
+        const res = await fetchMe();
         if (!active) return;
-        if (!res.ok) {
-          setUser(null);
+        if (res.ok) {
+          const data = await res.json();
+          setUser(data.user);
           return;
         }
-        const data = await res.json();
-        setUser(data.user);
+        if (res.status === 401) {
+          const refreshRes = await refresh();
+          if (refreshRes.ok) {
+            const res2 = await fetchMe();
+            if (res2.ok) {
+              const data = await res2.json();
+              if (active) setUser(data.user);
+              return;
+            }
+          }
+        }
+        if (active) setUser(null);
       } catch {
         if (active) {
           setUser(null);
@@ -43,6 +66,7 @@ export default function App() {
         }
       }
     }
+
     loadUser();
     return () => {
       active = false;
