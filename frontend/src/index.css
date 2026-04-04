@@ -146,6 +146,10 @@ button:hover {
   color: #8a1f1f;
 }
 
+.notice {
+  text-align: center;
+}
+
 .info {
   margin-top: 20px;
 }

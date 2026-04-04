@@ -3,10 +3,12 @@ import { Link, Navigate, Route, Routes } from "react-router-dom";
 import Login from "./pages/Login.jsx";
 import Signup from "./pages/Signup.jsx";
 import Profile from "./pages/Profile.jsx";
+import { API_BASE } from "./lib/api.js";
 
-const USER_KEY = "twofa_authenticator_user";
-
-function ProtectedRoute({ user, children }) {
+function ProtectedRoute({ user, loading, children }) {
+  if (loading) {
+    return <div className="notice">Checking session...</div>;
+  }
   if (!user) {
     return <Navigate to="/login" replace />;
   }
@@ -15,26 +17,51 @@ function ProtectedRoute({ user, children }) {
 
 export default function App() {
   const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const stored = localStorage.getItem(USER_KEY);
-    if (stored) {
+    let active = true;
+    async function loadUser() {
       try {
-        setUser(JSON.parse(stored));
+        const res = await fetch(`${API_BASE}/api/auth/me`, {
+          credentials: "include"
+        });
+        if (!active) return;
+        if (!res.ok) {
+          setUser(null);
+          return;
+        }
+        const data = await res.json();
+        setUser(data.user);
       } catch {
-        localStorage.removeItem(USER_KEY);
+        if (active) {
+          setUser(null);
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
       }
     }
+    loadUser();
+    return () => {
+      active = false;
+    };
   }, []);
 
   function handleAuth(nextUser) {
     setUser(nextUser);
-    localStorage.setItem(USER_KEY, JSON.stringify(nextUser));
   }
 
-  function handleLogout() {
-    setUser(null);
-    localStorage.removeItem(USER_KEY);
+  async function handleLogout() {
+    try {
+      await fetch(`${API_BASE}/api/auth/logout`, {
+        method: "POST",
+        credentials: "include"
+      });
+    } finally {
+      setUser(null);
+    }
   }
 
   return (
@@ -70,7 +97,7 @@ export default function App() {
           <Route
             path="/profile"
             element={
-              <ProtectedRoute user={user}>
+              <ProtectedRoute user={user} loading={loading}>
                 <Profile user={user} onLogout={handleLogout} />
               </ProtectedRoute>
             }
