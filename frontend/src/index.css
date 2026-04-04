@@ -67,7 +67,7 @@ body {
 }
 
 .page > .card {
-  width: min(560px, 100%);
+  width: min(640px, 100%);
 }
 
 .grid {
@@ -148,6 +148,39 @@ button:hover {
 
 .info {
   margin-top: 20px;
+}
+
+.profile-card {
+  width: min(720px, 100%);
+}
+
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #1f6f5b, #0f3c55);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 1.4rem;
+}
+
+.profile-meta h2 {
+  margin: 0 0 4px;
+  font-size: 1.6rem;
+}
+
+.profile-meta p {
+  margin: 0;
+  color: #5b6b76;
 }
 
 .info h2 {
