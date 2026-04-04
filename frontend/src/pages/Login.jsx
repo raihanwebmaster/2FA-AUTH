@@ -4,7 +4,12 @@ import { API_BASE } from "../lib/api.js";
 
 export default function Login({ onAuth }) {
   const navigate = useNavigate();
-  const [form, setForm] = useState({ username: "", password: "" });
+  const defaultUsername = import.meta.env.VITE_DEV_USERNAME || "";
+  const defaultPassword = import.meta.env.VITE_DEV_PASSWORD || "";
+  const [form, setForm] = useState({
+    username: defaultUsername,
+    password: defaultPassword
+  });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
