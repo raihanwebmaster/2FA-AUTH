@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 function getInitials(name = "") {
   return name
     .split(" ")
@@ -10,7 +12,22 @@ function getInitials(name = "") {
 
 export default function Profile({ user, onLogout }) {
   const initials = getInitials(user?.username || "User");
-  const openPopup = () => { };
+  const [isModalOpen, setIsModalOpen] = useState(false); // Add state for modal
+
+  const openPopup = () => {
+    setIsModalOpen(true); // Open modal
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false); // Close modal
+  };
+
+  const handleToggle2FA = () => {
+    // Add logic here to enable/disable 2FA (e.g., API call)
+    // For now, just toggle the user state (assuming you have a way to update it)
+    // user.twoFactorEnabled = !user.twoFactorEnabled; // Example
+    closeModal();
+  };
 
   return (
     <section className="card info profile-card">
@@ -32,13 +49,30 @@ export default function Profile({ user, onLogout }) {
       <div className="info-row">
         <span>Two-Factor Authentication</span>
         {/* <strong>{user?.twoFactorEnabled ? "Enabled" : "Disabled"}</strong> */}
-        <button className="ghost" type="button" onClick={()=>openPopup()}>
+        <button className="ghost" type="button" onClick={() => openPopup()}>
           {user?.twoFactorEnabled ? "Disable" : "Enable"}
         </button>
       </div>
       <button className="ghost" type="button" onClick={onLogout}>
         Logout
       </button>
+
+
+
+      {/* Add modal rendering */}
+      {isModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <h3>{user?.twoFactorEnabled ? "Disable" : "Enable"} 2FA</h3>
+            <p>Are you sure you want to {user?.twoFactorEnabled ? "disable" : "enable"} 2FA?</p>
+            {/* Add more content here, e.g., QR code for setup */}
+            <div className="modal-buttons">
+              <button onClick={handleToggle2FA}>Confirm</button>
+              <button onClick={closeModal}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
