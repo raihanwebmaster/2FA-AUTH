@@ -197,6 +197,7 @@ button:hover {
   padding: 12px 0;
   border-bottom: 1px solid #edf1f3;
   font-size: 1.05rem;
+  align-items: center;
 }
 
 .info-row span {

@@ -10,6 +10,7 @@ function getInitials(name = "") {
 
 export default function Profile({ user, onLogout }) {
   const initials = getInitials(user?.username || "User");
+  const openPopup = () => { };
 
   return (
     <section className="card info profile-card">
@@ -27,6 +28,13 @@ export default function Profile({ user, onLogout }) {
       <div className="info-row">
         <span>Email</span>
         <strong>{user?.email}</strong>
+      </div>
+      <div className="info-row">
+        <span>Two-Factor Authentication</span>
+        {/* <strong>{user?.twoFactorEnabled ? "Enabled" : "Disabled"}</strong> */}
+        <button className="ghost" type="button" onClick={()=>openPopup()}>
+          {user?.twoFactorEnabled ? "Disable" : "Enable"}
+        </button>
       </div>
       <button className="ghost" type="button" onClick={onLogout}>
         Logout
