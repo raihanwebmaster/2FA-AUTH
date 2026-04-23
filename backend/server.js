@@ -5,6 +5,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
+const OTPAuth = require("otpauth");
+const QRCode = require("qrcode");
 require("dotenv").config();
 
 const app = express();
@@ -25,6 +27,54 @@ const mongoUri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/2fa_auth"
 const jwtSecret = process.env.JWT_SECRET || "dev_secret_change_me";
 const accessTokenExpires = process.env.ACCESS_TOKEN_EXPIRES || "15m";
 const refreshTokenExpires = process.env.REFRESH_TOKEN_EXPIRES || "7d";
+const twoFaEncryptionKey =
+  process.env.TWO_FA_ENCRYPTION_KEY || "dev_2fa_secret";
+
+function getEncryptionKey() {
+  return crypto.createHash("sha256").update(twoFaEncryptionKey).digest();
+}
+
+function encrypt(text) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-cbc", getEncryptionKey(), iv);
+  let encrypted = cipher.update(text, "utf8", "hex");
+  encrypted += cipher.final("hex");
+  return `${iv.toString("hex")}:${encrypted}`;
+}
+
+function decrypt(payload) {
+  const [ivHex, encrypted] = payload.split(":");
+  const iv = Buffer.from(ivHex, "hex");
+  const decipher = crypto.createDecipheriv("aes-256-cbc", getEncryptionKey(), iv);
+  let decrypted = decipher.update(encrypted, "hex", "utf8");
+  decrypted += decipher.final("utf8");
+  return decrypted;
+}
+
+function generatePlainRecoveryCode() {
+  return crypto.randomBytes(5).toString("hex").toUpperCase();
+}
+
+async function generateRecoveryCodes(count = 10) {
+  const plainCodes = [];
+  const hashedCodes = [];
+
+  for (let i = 0; i < count; i++) {
+    const code = generatePlainRecoveryCode();
+    plainCodes.push(code);
+
+    const codeHash = await bcrypt.hash(code, 10);
+    hashedCodes.push({
+      codeHash,
+      usedAt: null
+    });
+  }
+
+  return {
+    plainCodes,
+    hashedCodes
+  };
+}
 
 function parseDurationMs(value, fallbackMs) {
   if (!value) return fallbackMs;
@@ -52,13 +102,52 @@ const userSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true },
     refreshTokenHash: { type: String, default: null },
     refreshTokenExpiresAt: { type: Date, default: null },
-    twoFactorEnabled: { type: Boolean, default: false },
-    twoFactorEnabledAt: { type: Date, default: null }
   },
   { timestamps: true }
 );
 
+const recoveryCodeSchema = new mongoose.Schema(
+  {
+    codeHash: { type: String, required: true },
+    usedAt: { type: Date, default: null },
+  },
+  { _id: false }
+);
+const twoFactorSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+    secretEnc: {
+      type: String,
+      required: true,
+    },
+    enabled: {
+      type: Boolean,
+      default: false,
+    },
+    verifiedAt: {
+      type: Date,
+      default: null,
+    },
+    lastUsedStep: {
+      type: Number,
+      default: null,
+    },
+    recoveryCodes: {
+      type: [recoveryCodeSchema],
+      default: [],
+    },
+  },
+  { timestamps: true }
+);
+
+
 const User = mongoose.model("User", userSchema);
+const TwoFactor = mongoose.model("TwoFactor", twoFactorSchema);
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok", service: "2fa-authenticator-backend" });
@@ -239,6 +328,131 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error("Me error", err);
+    return res.status(500).json({ message: "server error" });
+  }
+});
+
+app.get("/api/2fa/status", authMiddleware, async (req, res) => {
+  try {
+    const record = await TwoFactor.findOne({ userId: req.userId });
+
+    return res.json({
+      enabled: !!record?.enabled
+    });
+  } catch (err) {
+    console.error("2FA status error", err);
+    return res.status(500).json({ message: "server error" });
+  }
+});
+
+app.post("/api/2fa/setup", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ message: "user not found" });
+    }
+
+    const secret = new OTPAuth.Secret();
+
+    const totp = new OTPAuth.TOTP({
+      issuer: "MyApp",
+      label: user.email,
+      algorithm: "SHA1",
+      digits: 6,
+      period: 30,
+      secret
+    });
+
+    const otpauthUrl = totp.toString();
+    const qrDataUrl = await QRCode.toDataURL(otpauthUrl);
+
+    await TwoFactor.findOneAndUpdate(
+      { userId: user._id },
+      {
+        userId: user._id,
+        secretEnc: encrypt(secret.base32),
+        enabled: false,
+        verifiedAt: null,
+        lastUsedStep: null,
+        recoveryCodes: []
+      },
+      { upsert: true, new: true }
+    );
+
+    return res.json({
+      manualKey: secret.base32,
+      otpauthUrl,
+      qrDataUrl
+    });
+  } catch (err) {
+    console.error("2FA setup error", err);
+    return res.status(500).json({ message: "server error" });
+  }
+});
+
+app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ message: "token is required" });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ message: "user not found" });
+    }
+
+    const record = await TwoFactor.findOne({ userId: req.userId });
+    if (!record) {
+      return res.status(400).json({ message: "2FA setup not found" });
+    }
+
+    const secretBase32 = decrypt(record.secretEnc);
+
+    const totp = new OTPAuth.TOTP({
+      issuer: "MyApp",
+      label: user.email,
+      algorithm: "SHA1",
+      digits: 6,
+      period: 30,
+      secret: OTPAuth.Secret.fromBase32(secretBase32)
+    });
+
+    const delta = totp.validate({ token, window: 1 });
+
+    if (delta === null) {
+      return res.status(400).json({ message: "invalid code" });
+    }
+
+    const { plainCodes, hashedCodes } = await generateRecoveryCodes(10);
+
+    record.enabled = true;
+    record.verifiedAt = new Date();
+    record.lastUsedStep = totp.counter();
+    record.recoveryCodes = hashedCodes;
+
+    await record.save();
+
+    return res.json({
+      message: "2FA enabled successfully",
+      recoveryCodes: plainCodes
+    });
+  } catch (err) {
+    console.error("2FA verify setup error", err);
+    return res.status(500).json({ message: "server error" });
+  }
+});
+
+app.post("/api/2fa/disable", authMiddleware, async (req, res) => {
+  try {
+    await TwoFactor.findOneAndDelete({ userId: req.userId });
+
+    return res.json({
+      message: "2FA disabled successfully"
+    });
+  } catch (err) {
+    console.error("2FA disable error", err);
     return res.status(500).json({ message: "server error" });
   }
 });
