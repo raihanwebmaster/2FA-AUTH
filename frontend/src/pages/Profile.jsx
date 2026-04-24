@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { API_BASE } from "../lib/api.js";
+import { authFetch } from "../lib/authFetch.js";
 
 function getInitials(name = "") {
   return name
@@ -15,6 +16,7 @@ export default function Profile({ user, onLogout }) {
   const initials = getInitials(user?.username || "User");
 
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [modalMode, setModalMode] = useState(null);
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
   const [statusLoading, setStatusLoading] = useState(true);
 
@@ -33,9 +35,12 @@ export default function Profile({ user, onLogout }) {
     try {
       setStatusLoading(true);
 
-      const res = await fetch(`${API_BASE}/api/2fa/status`, {
-        credentials: "include"
-      });
+      const { res, sessionExpired } = await authFetch(`${API_BASE}/api/2fa/status`);
+
+      if (sessionExpired) {
+        setMessage("Your session expired. Please log in again.");
+        return;
+      }
 
       const data = await res.json();
 
@@ -58,19 +63,33 @@ export default function Profile({ user, onLogout }) {
     setManualKey("");
   }
 
-  function openPopup() {
-    setMessage("");
-    resetModalState();
-    setIsModalOpen(true);
-
-    if (!twoFactorEnabled) {
-      handleSetup();
-    }
-  }
-
   function closeModal() {
     setIsModalOpen(false);
+    setModalMode(null);
     resetModalState();
+  }
+
+  function openEnableModal() {
+    setMessage("");
+    resetModalState();
+    setModalMode("enable");
+    setIsModalOpen(true);
+    handleSetup();
+  }
+
+  function openDisableModal() {
+    setMessage("");
+    resetModalState();
+    setModalMode("disable");
+    setIsModalOpen(true);
+  }
+
+  function openResetModal() {
+    setMessage("");
+    resetModalState();
+    setModalMode("reset");
+    setIsModalOpen(true);
+    handleSetup();
   }
 
   async function handleSetup() {
@@ -78,10 +97,14 @@ export default function Profile({ user, onLogout }) {
       setActionLoading(true);
       setMessage("");
 
-      const res = await fetch(`${API_BASE}/api/2fa/setup`, {
-        method: "POST",
-        credentials: "include"
+      const { res, sessionExpired } = await authFetch(`${API_BASE}/api/2fa/setup`, {
+        method: "POST"
       });
+
+      if (sessionExpired) {
+        setMessage("Your session expired. Please log in again.");
+        return;
+      }
 
       const data = await res.json();
 
@@ -104,14 +127,18 @@ export default function Profile({ user, onLogout }) {
       setActionLoading(true);
       setMessage("");
 
-      const res = await fetch(`${API_BASE}/api/2fa/verify-setup`, {
+      const { res, sessionExpired } = await authFetch(`${API_BASE}/api/2fa/verify-setup`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        credentials: "include",
         body: JSON.stringify({ token })
       });
+
+      if (sessionExpired) {
+        setMessage("Your session expired. Please log in again.");
+        return;
+      }
 
       const data = await res.json();
 
@@ -122,27 +149,33 @@ export default function Profile({ user, onLogout }) {
 
       setTwoFactorEnabled(true);
       setRecoveryCodes(data.recoveryCodes || []);
-      setMessage(data.message || "2FA enabled successfully");
 
-      // ✅ close modal after success
+      if (modalMode === "reset") {
+        setMessage("2FA was reconfigured successfully");
+      } else {
+        setMessage(data.message || "2FA enabled successfully");
+      }
+
       closeModal();
-
     } catch {
       setMessage("Something went wrong while verifying 2FA");
     } finally {
       setActionLoading(false);
     }
   }
-
   async function handleDisable2FA() {
     try {
       setActionLoading(true);
       setMessage("");
 
-      const res = await fetch(`${API_BASE}/api/2fa/disable`, {
-        method: "POST",
-        credentials: "include"
+      const { res, sessionExpired } = await authFetch(`${API_BASE}/api/2fa/disable`, {
+        method: "POST"
       });
+
+      if (sessionExpired) {
+        setMessage("Your session expired. Please log in again.");
+        return;
+      }
 
       const data = await res.json();
 
@@ -185,6 +218,8 @@ export default function Profile({ user, onLogout }) {
     window.URL.revokeObjectURL(url);
   }
 
+  const isSetupMode = modalMode === "enable" || modalMode === "reset";
+
   return (
     <section className="card info profile-card">
       <div className="profile-header">
@@ -212,12 +247,32 @@ export default function Profile({ user, onLogout }) {
         </strong>
       </div>
 
-      <div className="info-row">
-        <span>Manage 2FA</span>
-        <button className="ghost" type="button" onClick={openPopup}>
-          {twoFactorEnabled ? "Disable" : "Enable"}
-        </button>
-      </div>
+      {!statusLoading && !twoFactorEnabled && (
+        <div className="info-row">
+          <span>Manage 2FA</span>
+          <button className="ghost" type="button" onClick={openEnableModal}>
+            Enable
+          </button>
+        </div>
+      )}
+
+      {!statusLoading && twoFactorEnabled && (
+        <>
+          <div className="info-row">
+            <span>Add another device</span>
+            <button className="ghost" type="button" onClick={openResetModal}>
+              Update with QR Code
+            </button>
+          </div>
+
+          <div className="info-row">
+            <span>Disable 2FA</span>
+            <button className="ghost" type="button" onClick={openDisableModal}>
+              Disable
+            </button>
+          </div>
+        </>
+      )}
 
       <button className="ghost" type="button" onClick={onLogout}>
         Logout
@@ -229,7 +284,6 @@ export default function Profile({ user, onLogout }) {
         </div>
       )}
 
-      {/* ✅ Only download button, no list */}
       {recoveryCodes.length > 0 && (
         <div style={{ marginTop: "20px" }}>
           <button className="ghost" type="button" onClick={downloadRecoveryCodes}>
@@ -241,12 +295,23 @@ export default function Profile({ user, onLogout }) {
       {isModalOpen && (
         <div className="modal-overlay">
           <div className="modal-content">
-            {!twoFactorEnabled ? (
+            {isSetupMode ? (
               <>
-                <h3>Enable 2FA</h3>
+                <h3>
+                  {modalMode === "reset"
+                    ? "Set Up 2FA on Another Device"
+                    : "Enable 2FA"}
+                </h3>
+
                 <p>
                   Scan the QR code with Google Authenticator or use the manual key.
                 </p>
+
+                {modalMode === "reset" && (
+                  <p style={{ marginTop: "8px" }}>
+                    This will replace your current 2FA secret with a new one.
+                  </p>
+                )}
 
                 {actionLoading && !qrDataUrl ? <p>Preparing QR code...</p> : null}
 
@@ -286,7 +351,11 @@ export default function Profile({ user, onLogout }) {
                         onClick={handleVerify2FA}
                         disabled={actionLoading || !token.trim()}
                       >
-                        {actionLoading ? "Verifying..." : "Verify & Enable"}
+                        {actionLoading
+                          ? "Verifying..."
+                          : modalMode === "reset"
+                            ? "Verify & Replace"
+                            : "Verify & Enable"}
                       </button>
 
                       <button type="button" onClick={closeModal}>

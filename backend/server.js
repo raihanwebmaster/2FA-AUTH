@@ -352,6 +352,9 @@ app.post("/api/2fa/setup", authMiddleware, async (req, res) => {
       return res.status(404).json({ message: "user not found" });
     }
 
+    const existingRecord = await TwoFactor.findOne({ userId: user._id });
+    const isReset = !!existingRecord?.enabled;
+
     const secret = new OTPAuth.Secret();
 
     const totp = new OTPAuth.TOTP({
@@ -382,7 +385,8 @@ app.post("/api/2fa/setup", authMiddleware, async (req, res) => {
     return res.json({
       manualKey: secret.base32,
       otpauthUrl,
-      qrDataUrl
+      qrDataUrl,
+      isReset
     });
   } catch (err) {
     console.error("2FA setup error", err);
@@ -408,6 +412,7 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "2FA setup not found" });
     }
 
+    const wasAlreadyConfigured = !!record.verifiedAt;
     const secretBase32 = decrypt(record.secretEnc);
 
     const totp = new OTPAuth.TOTP({
@@ -435,7 +440,9 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
     await record.save();
 
     return res.json({
-      message: "2FA enabled successfully",
+      message: wasAlreadyConfigured
+        ? "2FA reconfigured successfully"
+        : "2FA enabled successfully",
       recoveryCodes: plainCodes
     });
   } catch (err) {
