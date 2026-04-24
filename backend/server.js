@@ -109,7 +109,7 @@ const userSchema = new mongoose.Schema(
 const recoveryCodeSchema = new mongoose.Schema(
   {
     codeHash: { type: String, required: true },
-    usedAt: { type: Date, default: null },
+    usedAt: { type: Date, default: null }
   },
   { _id: false }
 );
@@ -119,28 +119,42 @@ const twoFactorSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      unique: true,
+      unique: true
     },
+
+    // active secret
     secretEnc: {
       type: String,
-      required: true,
+      default: null
     },
     enabled: {
       type: Boolean,
-      default: false,
+      default: false
     },
     verifiedAt: {
       type: Date,
-      default: null,
+      default: null
     },
+
+    // pending setup secret
+    pendingSecretEnc: {
+      type: String,
+      default: null
+    },
+    pendingCreatedAt: {
+      type: Date,
+      default: null
+    },
+
     lastUsedStep: {
       type: Number,
-      default: null,
+      default: null
     },
+
     recoveryCodes: {
       type: [recoveryCodeSchema],
-      default: [],
-    },
+      default: []
+    }
   },
   { timestamps: true }
 );
@@ -337,7 +351,8 @@ app.get("/api/2fa/status", authMiddleware, async (req, res) => {
     const record = await TwoFactor.findOne({ userId: req.userId });
 
     return res.json({
-      enabled: !!record?.enabled
+      enabled: !!record?.enabled,
+      hasPendingSetup: !!record?.pendingSecretEnc
     });
   } catch (err) {
     console.error("2FA status error", err);
@@ -351,9 +366,6 @@ app.post("/api/2fa/setup", authMiddleware, async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: "user not found" });
     }
-
-    const existingRecord = await TwoFactor.findOne({ userId: user._id });
-    const isReset = !!existingRecord?.enabled;
 
     const secret = new OTPAuth.Secret();
 
@@ -372,12 +384,11 @@ app.post("/api/2fa/setup", authMiddleware, async (req, res) => {
     await TwoFactor.findOneAndUpdate(
       { userId: user._id },
       {
-        userId: user._id,
-        secretEnc: encrypt(secret.base32),
-        enabled: false,
-        verifiedAt: null,
-        lastUsedStep: null,
-        recoveryCodes: []
+        $set: {
+          userId: user._id,
+          pendingSecretEnc: encrypt(secret.base32),
+          pendingCreatedAt: new Date()
+        }
       },
       { upsert: true, new: true }
     );
@@ -385,8 +396,7 @@ app.post("/api/2fa/setup", authMiddleware, async (req, res) => {
     return res.json({
       manualKey: secret.base32,
       otpauthUrl,
-      qrDataUrl,
-      isReset
+      qrDataUrl
     });
   } catch (err) {
     console.error("2FA setup error", err);
@@ -408,12 +418,11 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
     }
 
     const record = await TwoFactor.findOne({ userId: req.userId });
-    if (!record) {
+    if (!record || !record.pendingSecretEnc) {
       return res.status(400).json({ message: "2FA setup not found" });
     }
 
-    const wasAlreadyConfigured = !!record.verifiedAt;
-    const secretBase32 = decrypt(record.secretEnc);
+    const secretBase32 = decrypt(record.pendingSecretEnc);
 
     const totp = new OTPAuth.TOTP({
       issuer: "MyApp",
@@ -432,6 +441,9 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
 
     const { plainCodes, hashedCodes } = await generateRecoveryCodes(10);
 
+    record.secretEnc = record.pendingSecretEnc;
+    record.pendingSecretEnc = null;
+    record.pendingCreatedAt = null;
     record.enabled = true;
     record.verifiedAt = new Date();
     record.lastUsedStep = totp.counter();
@@ -440,9 +452,7 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
     await record.save();
 
     return res.json({
-      message: wasAlreadyConfigured
-        ? "2FA reconfigured successfully"
-        : "2FA enabled successfully",
+      message: "2FA setup completed successfully",
       recoveryCodes: plainCodes
     });
   } catch (err) {
@@ -453,13 +463,47 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
 
 app.post("/api/2fa/disable", authMiddleware, async (req, res) => {
   try {
-    await TwoFactor.findOneAndDelete({ userId: req.userId });
+    await TwoFactor.findOneAndUpdate(
+      { userId: req.userId },
+      {
+        $set: {
+          secretEnc: null,
+          pendingSecretEnc: null,
+          pendingCreatedAt: null,
+          enabled: false,
+          verifiedAt: null,
+          lastUsedStep: null,
+          recoveryCodes: []
+        }
+      }
+    );
 
     return res.json({
       message: "2FA disabled successfully"
     });
   } catch (err) {
     console.error("2FA disable error", err);
+    return res.status(500).json({ message: "server error" });
+  }
+});
+
+app.post("/api/2fa/cancel-setup", authMiddleware, async (req, res) => {
+  try {
+    await TwoFactor.findOneAndUpdate(
+      { userId: req.userId },
+      {
+        $set: {
+          pendingSecretEnc: null,
+          pendingCreatedAt: null
+        }
+      }
+    );
+
+    return res.json({
+      message: "Pending 2FA setup cancelled"
+    });
+  } catch (err) {
+    console.error("2FA cancel setup error", err);
     return res.status(500).json({ message: "server error" });
   }
 });

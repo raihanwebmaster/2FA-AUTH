@@ -163,6 +163,7 @@ export default function Profile({ user, onLogout }) {
       setActionLoading(false);
     }
   }
+
   async function handleDisable2FA() {
     try {
       setActionLoading(true);
@@ -309,7 +310,8 @@ export default function Profile({ user, onLogout }) {
 
                 {modalMode === "reset" && (
                   <p style={{ marginTop: "8px" }}>
-                    This will replace your current 2FA secret with a new one.
+                    This will prepare a new 2FA setup. Your current authenticator
+                    will keep working until you verify the new code.
                   </p>
                 )}
 
