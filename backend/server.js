@@ -11,16 +11,74 @@ require("dotenv").config();
 
 const app = express();
 
-const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+const clientOrigins = (process.env.CLIENT_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowedOriginSet = new Set(
+  clientOrigins
+    .map((origin) => getOrigin(origin))
+    .filter(Boolean)
+);
 
+function getOrigin(value) {
+  if (!value) return null;
+
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function securityHeaders(req, res, next) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  next();
+}
+
+function originCheck(req, res, next) {
+  const isUnsafeMethod = !["GET", "HEAD", "OPTIONS"].includes(req.method);
+
+  if (!isUnsafeMethod || !req.path.startsWith("/api/")) {
+    return next();
+  }
+
+  const requestOrigin = getOrigin(req.get("Origin") || req.get("Referer"));
+
+  if (!requestOrigin) {
+    const hasAuthCookie = Boolean(
+      req.cookies?.access_token ||
+        req.cookies?.refresh_token ||
+        req.cookies?.two_factor_challenge
+    );
+
+    if (hasAuthCookie) {
+      return res.status(403).json({ message: "missing request origin" });
+    }
+
+    return next();
+  }
+
+  if (allowedOriginSet.has(requestOrigin)) {
+    return next();
+  }
+
+  return res.status(403).json({ message: "invalid request origin" });
+}
+
+app.use(securityHeaders);
 app.use(
   cors({
-    origin: clientOrigin,
+    origin: clientOrigins,
     credentials: true
   })
 );
 app.use(express.json());
 app.use(cookieParser());
+app.use(originCheck);
 
 const port = process.env.PORT || 4000;
 const mongoUri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/2fa_auth";
@@ -94,9 +152,101 @@ function parseDurationMs(value, fallbackMs) {
   return amount * (multipliers[unit] || 1);
 }
 
+function getClientIp(req) {
+  return req.ip || req.socket?.remoteAddress || "unknown";
+}
+
+function createRateLimiter({ windowMs, max, message, keyGenerator }) {
+  const hits = new Map();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = keyGenerator(req);
+    let entry = hits.get(key);
+
+    if (!entry || entry.resetAt <= now) {
+      entry = {
+        count: 0,
+        resetAt: now + windowMs
+      };
+      hits.set(key, entry);
+    }
+
+    entry.count += 1;
+
+    if (hits.size > 10000) {
+      for (const [hitKey, hitEntry] of hits.entries()) {
+        if (hitEntry.resetAt <= now) {
+          hits.delete(hitKey);
+        }
+      }
+    }
+
+    const retryAfterSeconds = Math.ceil((entry.resetAt - now) / 1000);
+    res.setHeader("RateLimit-Limit", max);
+    res.setHeader("RateLimit-Remaining", Math.max(0, max - entry.count));
+    res.setHeader("RateLimit-Reset", Math.ceil(entry.resetAt / 1000));
+
+    if (entry.count > max) {
+      res.setHeader("Retry-After", retryAfterSeconds);
+      return res.status(429).json({ message });
+    }
+
+    return next();
+  };
+}
+
+function scopedIpKey(scope) {
+  return (req) => `${scope}:${getClientIp(req)}`;
+}
+
+function loginRateKey(req) {
+  const username =
+    typeof req.body?.username === "string"
+      ? req.body.username.trim().toLowerCase()
+      : "unknown";
+
+  return `login:${getClientIp(req)}:${username}`;
+}
+
 const accessTokenMaxAgeMs = parseDurationMs(accessTokenExpires, 15 * 60 * 1000);
 const refreshTokenMaxAgeMs = parseDurationMs(refreshTokenExpires, 7 * 24 * 60 * 60 * 1000);
 const twoFaChallengeMaxAgeMs = parseDurationMs(twoFaChallengeExpires, 5 * 60 * 1000);
+
+const registerLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "too many signup attempts, please try again later",
+  keyGenerator: scopedIpKey("register")
+});
+
+const loginLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "too many login attempts, please try again later",
+  keyGenerator: loginRateKey
+});
+
+const refreshLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: "too many refresh attempts, please try again later",
+  keyGenerator: scopedIpKey("refresh")
+});
+
+const twoFactorSetupLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  message: "too many 2FA setup attempts, please try again later",
+  keyGenerator: scopedIpKey("2fa-setup")
+});
+
+const twoFactorVerifyLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  message: "too many 2FA verification attempts, please try again later",
+  keyGenerator: scopedIpKey("2fa-verify")
+});
 
 const userSchema = new mongoose.Schema(
   {
@@ -272,7 +422,7 @@ function authMiddleware(req, res, next) {
   }
 }
 
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", registerLimiter, async (req, res) => {
   try {
     const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
     const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
@@ -304,7 +454,7 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", loginLimiter, async (req, res) => {
   try {
     const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
     const password = req.body.password;
@@ -369,7 +519,7 @@ app.post("/api/auth/logout", async (req, res) => {
   }
 });
 
-app.post("/api/auth/refresh", async (req, res) => {
+app.post("/api/auth/refresh", refreshLimiter, async (req, res) => {
   try {
     const refreshToken = req.cookies?.refresh_token;
     if (!refreshToken) {
@@ -423,7 +573,7 @@ app.get("/api/2fa/status", authMiddleware, async (req, res) => {
   }
 });
 
-app.post("/api/2fa/setup", authMiddleware, async (req, res) => {
+app.post("/api/2fa/setup", twoFactorSetupLimiter, authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
     if (!user) {
@@ -467,7 +617,7 @@ app.post("/api/2fa/setup", authMiddleware, async (req, res) => {
   }
 });
 
-app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
+app.post("/api/2fa/verify-setup", twoFactorVerifyLimiter, authMiddleware, async (req, res) => {
   try {
     const { token } = req.body;
 
@@ -573,7 +723,7 @@ app.post("/api/2fa/cancel-setup", authMiddleware, async (req, res) => {
   }
 });
 
-app.post("/api/2fa/verify-login", async (req, res) => {
+app.post("/api/2fa/verify-login", twoFactorVerifyLimiter, async (req, res) => {
   try {
     const { token, recoveryCode } = req.body;
     const normalizedToken = typeof token === "string" ? token.replace(/\s+/g, "") : "";

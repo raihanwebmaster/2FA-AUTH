@@ -222,24 +222,95 @@ button:hover {
   left: 0;
   width: 100%;
   height: 100%;
+  padding: 20px;
   background: rgba(0, 0, 0, 0.5);
   display: flex;
   justify-content: center;
   align-items: center;
+  overflow-y: auto;
 }
 
 .modal-content {
   background: white;
   padding: 20px;
   border-radius: 8px;
-  max-width: 1000px;
-  min-width: 500px;
+  width: min(520px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+.modal-content p {
+  overflow-wrap: anywhere;
+}
+
+.modal-content img {
+  max-width: 100%;
+  height: auto;
 }
 
 .modal-buttons {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  .app {
+    margin: 20px 12px;
+    padding: 20px;
+    border-radius: 14px;
+  }
+
+  .header {
+    gap: 12px;
+  }
+
+  .nav {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .page {
+    min-height: auto;
+    align-items: flex-start;
+  }
+
+  .card {
+    padding: 20px;
+  }
+
+  .profile-header {
+    align-items: flex-start;
+  }
+
+  .info-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .info-row strong {
+    overflow-wrap: anywhere;
+  }
+
+  .modal-overlay {
+    align-items: flex-start;
+    padding: 12px;
+  }
+
+  .modal-content {
+    padding: 16px;
+    max-height: calc(100vh - 24px);
+  }
+
+  .modal-buttons {
+    justify-content: stretch;
+  }
+
+  .modal-buttons button {
+    width: 100%;
+  }
 }
 
 @keyframes fadeIn {

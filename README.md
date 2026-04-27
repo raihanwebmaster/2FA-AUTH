@@ -12,6 +12,10 @@ A small MERN-style authentication project with password login, HTTP-only JWT coo
 - One-time recovery codes for 2FA login
 - 2FA disable and reconfiguration flow
 - Server-side 2FA login challenge before full session cookies are issued
+- 2FA enabled timestamp on the profile page
+- Basic rate limiting for auth and 2FA-sensitive routes
+- Origin checks for cookie-authenticated API writes
+- Responsive 2FA modal for smaller screens
 
 ## Tech Stack
 
@@ -98,6 +102,8 @@ VITE_API_BASE=http://localhost:4000
 
 Use strong unique values for `JWT_SECRET` and `TWO_FA_ENCRYPTION_KEY`. Changing `TWO_FA_ENCRYPTION_KEY` after users enable 2FA will make the stored 2FA secrets unreadable.
 
+`CLIENT_ORIGIN` is used by CORS and by the origin check for unsafe API requests. For multiple frontend origins, separate them with commas.
+
 ## API Endpoints
 
 ```text
@@ -129,6 +135,16 @@ Protected routes use the `access_token` cookie. The frontend `authFetch` helper 
 6. After successful 2FA verification, the backend issues the full access and refresh cookies and clears the challenge cookie.
 7. Recovery codes are hashed in MongoDB and can be used only once.
 
+## Security Controls
+
+- Login, signup, refresh, 2FA setup, and 2FA verification routes have in-memory rate limits.
+- Cookie-authenticated unsafe API requests must come from `CLIENT_ORIGIN` through the `Origin` or `Referer` header.
+- Security headers disable MIME sniffing, framing, referrer leakage, and unused browser permissions.
+- TOTP verification accepts only the current 30-second code window.
+- Recovery codes are generated once, hashed before storage, and marked used after successful login.
+
+The rate limiter is in-memory, so it resets when the server restarts.
+
 ## Verification
 
 Commands used to check the current project:
@@ -144,15 +160,6 @@ npm audit --omit=dev
 ```
 
 Current result: backend syntax check passed, frontend production build passed, and both npm audits reported 0 vulnerabilities.
-
-## Recommended Improvements
-
-- Add rate limiting for login, refresh, TOTP verification, and recovery-code verification.
-- Add CSRF protection for cookie-authenticated POST routes.
-- Add automated backend tests for register, login, refresh, 2FA setup, 2FA login, and recovery-code reuse.
-- Add frontend tests for the login challenge, expired-session retry, and 2FA profile actions.
-- Make modal styling more responsive for small mobile screens.
-- Split `backend/server.js` into models, middleware, controllers, and route modules if the API grows further.
 
 ## Production Notes
 
