@@ -446,7 +446,7 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
     record.pendingCreatedAt = null;
     record.enabled = true;
     record.verifiedAt = new Date();
-    record.lastUsedStep = totp.counter();
+    record.lastUsedStep = null;
     record.recoveryCodes = hashedCodes;
 
     await record.save();
@@ -504,6 +504,86 @@ app.post("/api/2fa/cancel-setup", authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error("2FA cancel setup error", err);
+    return res.status(500).json({ message: "server error" });
+  }
+});
+
+app.post("/api/2fa/verify-login", authMiddleware, async (req, res) => {
+  try {
+    const { token, recoveryCode } = req.body;
+
+    if (!token && !recoveryCode) {
+      return res.status(400).json({
+        message: "token or recoveryCode is required"
+      });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ message: "user not found" });
+    }
+
+    const record = await TwoFactor.findOne({ userId: user._id });
+
+    if (!record || !record.enabled || !record.secretEnc) {
+      return res.status(400).json({ message: "2FA is not enabled" });
+    }
+
+    let verified = false;
+
+    if (token) {
+      const secretBase32 = decrypt(record.secretEnc);
+
+      const totp = new OTPAuth.TOTP({
+        issuer: "MyApp",
+        label: user.email,
+        algorithm: "SHA1",
+        digits: 6,
+        period: 30,
+        secret: OTPAuth.Secret.fromBase32(secretBase32)
+      });
+
+      const delta = totp.validate({ token, window: 1 });
+
+      if (delta !== null) {
+        const currentStep = totp.counter();
+
+        if (record.lastUsedStep === currentStep) {
+          return res.status(400).json({ message: "code already used" });
+        }
+
+        record.lastUsedStep = currentStep;
+        await record.save();
+        verified = true;
+      }
+    }
+
+    if (!verified && recoveryCode) {
+      for (const item of record.recoveryCodes) {
+        if (item.usedAt) continue;
+
+        const matched = await bcrypt.compare(recoveryCode.trim(), item.codeHash);
+
+        if (matched) {
+          item.usedAt = new Date();
+          await record.save();
+          verified = true;
+          break;
+        }
+      }
+    }
+
+    if (!verified) {
+      return res.status(400).json({
+        message: "invalid 2FA code or recovery code"
+      });
+    }
+
+    return res.json({
+      message: "2FA verified successfully"
+    });
+  } catch (err) {
+    console.error("2FA login verify error", err);
     return res.status(500).json({ message: "server error" });
   }
 });
