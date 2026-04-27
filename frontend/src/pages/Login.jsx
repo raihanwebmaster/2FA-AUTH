@@ -12,7 +12,6 @@ export default function Login({ onAuth }) {
     password: defaultPassword
   });
 
-  const [pendingUser, setPendingUser] = useState(null);
   const [requiresTwoFactor, setRequiresTwoFactor] = useState(false);
 
   const [otpCode, setOtpCode] = useState("");
@@ -44,21 +43,9 @@ export default function Login({ onAuth }) {
         return;
       }
 
-      const statusRes = await fetch(`${API_BASE}/api/2fa/status`, {
-        credentials: "include"
-      });
-
-      const statusData = await statusRes.json();
-
-      if (!statusRes.ok) {
-        setError(statusData.message || "Failed to check 2FA status");
-        return;
-      }
-
-      if (statusData.enabled) {
-        setPendingUser(data.user);
+      if (data.requiresTwoFactor) {
         setRequiresTwoFactor(true);
-        setMessage("Enter your 2FA code to continue");
+        setMessage(data.message || "Enter your 2FA code to continue");
         return;
       }
 
@@ -98,13 +85,12 @@ export default function Login({ onAuth }) {
         return;
       }
 
-      onAuth(pendingUser);
+      onAuth(data.user);
       setMessage("Login successful");
       setForm({ username: "", password: "" });
       setOtpCode("");
       setRecoveryCode("");
       setRequiresTwoFactor(false);
-      setPendingUser(null);
       navigate("/profile");
     } catch {
       setError("Network error");
@@ -113,9 +99,17 @@ export default function Login({ onAuth }) {
     }
   }
 
-  function cancelTwoFactor() {
+  async function cancelTwoFactor() {
+    try {
+      await fetch(`${API_BASE}/api/auth/logout`, {
+        method: "POST",
+        credentials: "include"
+      });
+    } catch {
+      // The UI still exits the challenge state; the challenge cookie will expire.
+    }
+
     setRequiresTwoFactor(false);
-    setPendingUser(null);
     setOtpCode("");
     setRecoveryCode("");
     setUseRecoveryCode(false);

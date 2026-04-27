@@ -27,8 +27,10 @@ const mongoUri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/2fa_auth"
 const jwtSecret = process.env.JWT_SECRET || "dev_secret_change_me";
 const accessTokenExpires = process.env.ACCESS_TOKEN_EXPIRES || "15m";
 const refreshTokenExpires = process.env.REFRESH_TOKEN_EXPIRES || "7d";
+const twoFaChallengeExpires = process.env.TWO_FA_CHALLENGE_EXPIRES || "5m";
 const twoFaEncryptionKey =
   process.env.TWO_FA_ENCRYPTION_KEY || "dev_2fa_secret";
+const cookieSecure = process.env.COOKIE_SECURE === "true";
 
 function getEncryptionKey() {
   return crypto.createHash("sha256").update(twoFaEncryptionKey).digest();
@@ -94,6 +96,7 @@ function parseDurationMs(value, fallbackMs) {
 
 const accessTokenMaxAgeMs = parseDurationMs(accessTokenExpires, 15 * 60 * 1000);
 const refreshTokenMaxAgeMs = parseDurationMs(refreshTokenExpires, 7 * 24 * 60 * 60 * 1000);
+const twoFaChallengeMaxAgeMs = parseDurationMs(twoFaChallengeExpires, 5 * 60 * 1000);
 
 const userSchema = new mongoose.Schema(
   {
@@ -171,22 +174,69 @@ function signAccessToken(userId) {
   return jwt.sign({ sub: userId }, jwtSecret, { expiresIn: accessTokenExpires });
 }
 
-function setAccessCookie(res, token) {
-  res.cookie("access_token", token, {
+function signTwoFactorChallengeToken(userId) {
+  return jwt.sign(
+    { sub: userId, purpose: "2fa-login" },
+    jwtSecret,
+    { expiresIn: twoFaChallengeExpires }
+  );
+}
+
+function getCookieOptions(maxAge) {
+  const options = {
     httpOnly: true,
     sameSite: "lax",
-    secure: false,
-    maxAge: accessTokenMaxAgeMs
-  });
+    secure: cookieSecure
+  };
+
+  if (maxAge) {
+    options.maxAge = maxAge;
+  }
+
+  return options;
+}
+
+function setAccessCookie(res, token) {
+  res.cookie("access_token", token, getCookieOptions(accessTokenMaxAgeMs));
 }
 
 function setRefreshCookie(res, token) {
-  res.cookie("refresh_token", token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: false,
-    maxAge: refreshTokenMaxAgeMs
-  });
+  res.cookie("refresh_token", token, getCookieOptions(refreshTokenMaxAgeMs));
+}
+
+function setTwoFactorChallengeCookie(res, token) {
+  res.cookie(
+    "two_factor_challenge",
+    token,
+    getCookieOptions(twoFaChallengeMaxAgeMs)
+  );
+}
+
+function clearCookie(res, name) {
+  res.clearCookie(name, getCookieOptions());
+}
+
+function clearAuthCookies(res) {
+  clearCookie(res, "access_token");
+  clearCookie(res, "refresh_token");
+  clearCookie(res, "two_factor_challenge");
+}
+
+function getTwoFactorChallengeUserId(req) {
+  const token = req.cookies?.two_factor_challenge;
+  if (!token) {
+    return null;
+  }
+
+  try {
+    const payload = jwt.verify(token, jwtSecret);
+    if (payload.purpose !== "2fa-login") {
+      return null;
+    }
+    return payload.sub;
+  } catch {
+    return null;
+  }
 }
 
 function hashToken(token) {
@@ -205,6 +255,7 @@ async function issueTokens(res, user) {
   await user.save();
   setAccessCookie(res, accessToken);
   setRefreshCookie(res, refreshToken);
+  clearCookie(res, "two_factor_challenge");
 }
 
 function authMiddleware(req, res, next) {
@@ -223,9 +274,11 @@ function authMiddleware(req, res, next) {
 
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const { username, email, password } = req.body;
+    const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
+    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const password = req.body.password;
 
-    if (!username || !email || !password) {
+    if (!username || !email || typeof password !== "string") {
       return res.status(400).json({ message: "username, email, and password are required" });
     }
 
@@ -253,9 +306,10 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
+    const password = req.body.password;
 
-    if (!username || !password) {
+    if (!username || typeof password !== "string") {
       return res.status(400).json({ message: "username and password are required" });
     }
 
@@ -269,9 +323,26 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(401).json({ message: "invalid credentials" });
     }
 
+    const twoFactor = await TwoFactor.findOne({ userId: user._id });
+
+    if (twoFactor?.enabled && twoFactor.secretEnc) {
+      clearCookie(res, "access_token");
+      clearCookie(res, "refresh_token");
+      setTwoFactorChallengeCookie(
+        res,
+        signTwoFactorChallengeToken(user._id.toString())
+      );
+
+      return res.json({
+        requiresTwoFactor: true,
+        message: "two-factor verification required"
+      });
+    }
+
     await issueTokens(res, user);
 
     return res.json({
+      requiresTwoFactor: false,
       user: { id: user._id, username: user.username, email: user.email }
     });
   } catch (err) {
@@ -293,16 +364,7 @@ app.post("/api/auth/logout", async (req, res) => {
   } catch (err) {
     console.error("Logout error", err);
   } finally {
-    res.clearCookie("access_token", {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: false
-    });
-    res.clearCookie("refresh_token", {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: false
-    });
+    clearAuthCookies(res);
     res.json({ message: "logged out" });
   }
 });
@@ -352,7 +414,8 @@ app.get("/api/2fa/status", authMiddleware, async (req, res) => {
 
     return res.json({
       enabled: !!record?.enabled,
-      hasPendingSetup: !!record?.pendingSecretEnc
+      hasPendingSetup: !!record?.pendingSecretEnc,
+      enabledAt: record?.enabled ? record.verifiedAt : null
     });
   } catch (err) {
     console.error("2FA status error", err);
@@ -433,12 +496,13 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
       secret: OTPAuth.Secret.fromBase32(secretBase32)
     });
 
-    const delta = totp.validate({ token, window: 1 });
+    const valid = totp.validate({ token, window: 0 }) !== null;
 
-    if (delta === null) {
+    if (!valid) {
       return res.status(400).json({ message: "invalid code" });
     }
 
+    const usedStep = totp.counter();
     const { plainCodes, hashedCodes } = await generateRecoveryCodes(10);
 
     record.secretEnc = record.pendingSecretEnc;
@@ -446,13 +510,14 @@ app.post("/api/2fa/verify-setup", authMiddleware, async (req, res) => {
     record.pendingCreatedAt = null;
     record.enabled = true;
     record.verifiedAt = new Date();
-    record.lastUsedStep = null;
+    record.lastUsedStep = usedStep;
     record.recoveryCodes = hashedCodes;
 
     await record.save();
 
     return res.json({
       message: "2FA setup completed successfully",
+      enabledAt: record.verifiedAt,
       recoveryCodes: plainCodes
     });
   } catch (err) {
@@ -508,18 +573,28 @@ app.post("/api/2fa/cancel-setup", authMiddleware, async (req, res) => {
   }
 });
 
-app.post("/api/2fa/verify-login", authMiddleware, async (req, res) => {
+app.post("/api/2fa/verify-login", async (req, res) => {
   try {
     const { token, recoveryCode } = req.body;
+    const normalizedToken = typeof token === "string" ? token.replace(/\s+/g, "") : "";
+    const normalizedRecoveryCode =
+      typeof recoveryCode === "string" ? recoveryCode.trim().toUpperCase() : "";
 
-    if (!token && !recoveryCode) {
+    if (!normalizedToken && !normalizedRecoveryCode) {
       return res.status(400).json({
         message: "token or recoveryCode is required"
       });
     }
 
-    const user = await User.findById(req.userId);
+    const challengeUserId = getTwoFactorChallengeUserId(req);
+    if (!challengeUserId) {
+      clearCookie(res, "two_factor_challenge");
+      return res.status(401).json({ message: "2FA challenge expired or missing" });
+    }
+
+    const user = await User.findById(challengeUserId);
     if (!user) {
+      clearCookie(res, "two_factor_challenge");
       return res.status(404).json({ message: "user not found" });
     }
 
@@ -531,7 +606,7 @@ app.post("/api/2fa/verify-login", authMiddleware, async (req, res) => {
 
     let verified = false;
 
-    if (token) {
+    if (normalizedToken) {
       const secretBase32 = decrypt(record.secretEnc);
 
       const totp = new OTPAuth.TOTP({
@@ -543,26 +618,26 @@ app.post("/api/2fa/verify-login", authMiddleware, async (req, res) => {
         secret: OTPAuth.Secret.fromBase32(secretBase32)
       });
 
-      const delta = totp.validate({ token, window: 1 });
+      const valid = totp.validate({ token: normalizedToken, window: 0 }) !== null;
 
-      if (delta !== null) {
-        const currentStep = totp.counter();
+      if (valid) {
+        const usedStep = totp.counter();
 
-        if (record.lastUsedStep === currentStep) {
+        if (record.lastUsedStep === usedStep) {
           return res.status(400).json({ message: "code already used" });
         }
 
-        record.lastUsedStep = currentStep;
+        record.lastUsedStep = usedStep;
         await record.save();
         verified = true;
       }
     }
 
-    if (!verified && recoveryCode) {
+    if (!verified && normalizedRecoveryCode) {
       for (const item of record.recoveryCodes) {
         if (item.usedAt) continue;
 
-        const matched = await bcrypt.compare(recoveryCode.trim(), item.codeHash);
+        const matched = await bcrypt.compare(normalizedRecoveryCode, item.codeHash);
 
         if (matched) {
           item.usedAt = new Date();
@@ -579,8 +654,11 @@ app.post("/api/2fa/verify-login", authMiddleware, async (req, res) => {
       });
     }
 
+    await issueTokens(res, user);
+
     return res.json({
-      message: "2FA verified successfully"
+      message: "2FA verified successfully",
+      user: { id: user._id, username: user.username, email: user.email }
     });
   } catch (err) {
     console.error("2FA login verify error", err);

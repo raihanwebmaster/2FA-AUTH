@@ -12,12 +12,22 @@ function getInitials(name = "") {
     .toUpperCase();
 }
 
+function formatDateTime(value) {
+  if (!value) return "";
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(new Date(value));
+}
+
 export default function Profile({ user, onLogout }) {
   const initials = getInitials(user?.username || "User");
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState(null);
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
+  const [twoFactorEnabledAt, setTwoFactorEnabledAt] = useState(null);
   const [statusLoading, setStatusLoading] = useState(true);
 
   const [qrDataUrl, setQrDataUrl] = useState("");
@@ -50,6 +60,7 @@ export default function Profile({ user, onLogout }) {
       }
 
       setTwoFactorEnabled(!!data.enabled);
+      setTwoFactorEnabledAt(data.enabledAt || null);
     } catch {
       setMessage("Failed to load 2FA status");
     } finally {
@@ -148,6 +159,7 @@ export default function Profile({ user, onLogout }) {
       }
 
       setTwoFactorEnabled(true);
+      setTwoFactorEnabledAt(data.enabledAt || new Date().toISOString());
       setRecoveryCodes(data.recoveryCodes || []);
 
       if (modalMode === "reset") {
@@ -186,6 +198,7 @@ export default function Profile({ user, onLogout }) {
       }
 
       setTwoFactorEnabled(false);
+      setTwoFactorEnabledAt(null);
       setRecoveryCodes([]);
       setMessage(data.message || "2FA disabled successfully");
 
@@ -247,6 +260,13 @@ export default function Profile({ user, onLogout }) {
           {statusLoading ? "Checking..." : twoFactorEnabled ? "Enabled" : "Disabled"}
         </strong>
       </div>
+
+      {!statusLoading && twoFactorEnabled && twoFactorEnabledAt && (
+        <div className="info-row">
+          <span>Enabled At</span>
+          <strong>{formatDateTime(twoFactorEnabledAt)}</strong>
+        </div>
+      )}
 
       {!statusLoading && !twoFactorEnabled && (
         <div className="info-row">
